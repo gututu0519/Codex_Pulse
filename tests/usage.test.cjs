@@ -54,6 +54,47 @@ test('系统日历区间正确处理夏令时，不固定加二十四小时', ()
   } finally { if (original === undefined) delete process.env.TZ; else process.env.TZ = original; }
 });
 
+test('新版按独立 type 列统计，排除未完成、非助手及日期边界之外的消息', () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    db.exec('CREATE TABLE session_message(id TEXT PRIMARY KEY, session_id TEXT, type TEXT, data TEXT)');
+    const insert = db.prepare('INSERT INTO session_message VALUES(?,?,?,?)');
+    const now = new Date(2026, 9, 24, 12);
+    const { start, end } = dayRange(now);
+    const tokens = { input: 2, output: 3, reasoning: 1, cache: { read: 4, write: 0 } };
+    const samples = [
+      ['a', 's1', 'assistant', { time: { completed: start }, tokens }],
+      ['b', 's2', 'assistant', { time: { completed: end - 1 }, tokens }],
+      ['c', 's1', 'assistant', { time: { completed: end }, tokens }],
+      ['d', 's1', 'assistant', { time: { created: start }, tokens }],
+      ['e', 's1', 'user', { time: { completed: start }, tokens }],
+      ['f', 's1', 'assistant', { time: { completed: start - 1 }, tokens }],
+      ['g', 's1', 'idle', { time: { completed: start }, tokens }],
+    ];
+    for (const [id, session, type, data] of samples) insert.run(id, session, type, JSON.stringify(data));
+    const result = aggregateUsage(db, now);
+    assert.equal(result.tokens, 20);
+    assert.equal(result.messages, 2);
+    assert.equal(result.sessions, 2);
+    assert.equal(result.cacheRead, 8);
+    assert.equal(result.fallback, 2);
+  } finally { db.close(); }
+});
+
+test('新旧表共存时只读取新表，避免迁移数据重复统计或回退到旧数据', () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    db.exec('CREATE TABLE message(session_id TEXT, data TEXT); CREATE TABLE session_message(session_id TEXT, type TEXT, data TEXT)');
+    const now = new Date();
+    const data = JSON.stringify({ role: 'assistant', time: { completed: +now }, tokens: { total: 100 } });
+    db.prepare('INSERT INTO message VALUES(?,?)').run('s', data);
+    assert.equal(aggregateUsage(db, now).tokens, 0);
+    db.prepare('INSERT INTO session_message VALUES(?,?,?)').run('s', 'assistant', data);
+    assert.equal(aggregateUsage(db, now).tokens, 100);
+    assert.equal(aggregateUsage(db, now).messages, 1);
+  } finally { db.close(); }
+});
+
 test('数据库路径不存在时返回错误，不创建数据库或误报零消耗', () => {
   const result = readOpenCodeUsage(new Date(), 'Z:/missing-codex-pulse-test/opencode.db');
   assert.equal(result.tokens, null);

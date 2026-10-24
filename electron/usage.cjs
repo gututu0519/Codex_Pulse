@@ -18,8 +18,11 @@ function aggregateUsage(db, now = new Date()) {
   const range = dayRange(now);
   const result = { date: range.date, tokens: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, messages: 0, sessions: 0, missing: 0, fallback: 0, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, updatedAt: +now, error: null };
   const sessions = new Set();
+  const hasV2 = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_message'").get();
+  const table = hasV2 ? 'session_message' : 'message';
+  const role = hasV2 ? "type = 'assistant'" : "json_extract(data, '$.role') = 'assistant'";
   const rows = db.prepare(`SELECT session_id, json_extract(data, '$.tokens') AS tokens
-    FROM message WHERE json_valid(data) AND json_extract(data, '$.role') = 'assistant'
+    FROM ${table} WHERE json_valid(data) AND ${role}
     AND json_extract(data, '$.time.completed') >= ? AND json_extract(data, '$.time.completed') < ?`);
   for (const row of rows.iterate(range.start, range.end)) {
     const tokens = row.tokens ? JSON.parse(row.tokens) : null;
