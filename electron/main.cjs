@@ -5,6 +5,7 @@ const { CodexClient } = require('./codex.cjs');
 const { normalizeQuota, collectAlerts } = require('./quota.cjs');
 const { Worker } = require('node:worker_threads');
 const { AutoReset } = require('./auto-reset.cjs');
+const { AGENTS } = require('./agent-usage.cjs');
 
 let win, tray, interval, settingsPath;
 let quitting = false;
@@ -17,7 +18,7 @@ let usageWorker = null;
 let usageTimer;
 let autoReset, resetTimer;
 let compactDrag = null;
-let settings = { pinned: true, compact: false, opacity: 96, interval: 60, notifications: true, startup: false, autoReset: true, lowQuotaReset: true };
+let settings = { pinned: true, compact: false, opacity: 96, interval: 60, notifications: true, startup: false, autoReset: true, lowQuotaReset: true, usageSources: [...AGENTS] };
 let state = { status: 'connecting', account: null, quota: null, usage: null, updatedAt: null, error: null, busy: false };
 const client = new CodexClient();
 const seenAlerts = new Set();
@@ -89,16 +90,16 @@ async function refreshQuota(account) {
 /** 在工作线程读取本地用量，独立于官方连接，每次读取结束释放数据库锁。 */
 function refreshUsage() {
   if (usageWorker || quitting) return;
-  const worker = new Worker(path.join(__dirname, 'usage.cjs'), { workerData: { now: Date.now() } });
+  const worker = new Worker(path.join(__dirname, 'agent-usage.cjs'), { workerData: { now: Date.now() } });
   usageWorker = worker;
   let received = false;
-  const timeout = setTimeout(() => void worker.terminate(), 15000);
+  const timeout = setTimeout(() => void worker.terminate(), 60000);
   worker.once('message', result => { received = true; state.usage = result; publish(); });
   worker.once('error', () => { /* 退出事件统一显示失败状态。 */ });
   worker.once('exit', () => {
     clearTimeout(timeout);
     usageWorker = null;
-    if (!received && !quitting) { state.usage = { tokens: null, error: 'OpenCode 用量读取失败或超时，稍后自动重试。' }; publish(); }
+    if (!received && !quitting) { state.usage = { tokens: null, error: '本地用量读取失败或超时，稍后自动重试。' }; publish(); }
   });
 }
 
@@ -138,6 +139,7 @@ function fitWindow() {
 /** 应用经过校验的界面设置并保存。 */
 function updateSettings(patch) {
   compactDrag = null;
+  if (Array.isArray(patch.usageSources)) settings.usageSources = AGENTS.filter(agent => patch.usageSources.includes(agent));
   for (const key of ['pinned', 'compact', 'notifications', 'startup', 'autoReset', 'lowQuotaReset']) if (typeof patch[key] === 'boolean') settings[key] = patch[key];
   if (Number.isFinite(patch.opacity)) settings.opacity = Math.max(65, Math.min(100, Math.round(patch.opacity)));
   if ([30, 60, 120, 300].includes(patch.interval)) settings.interval = patch.interval;
@@ -234,6 +236,7 @@ else {
     settingsPath = path.join(app.getPath('userData'), 'settings.json');
     try {
       const saved = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+      if (Array.isArray(saved.usageSources)) settings.usageSources = AGENTS.filter(agent => saved.usageSources.includes(agent));
       for (const key of ['pinned', 'compact', 'notifications', 'startup', 'autoReset', 'lowQuotaReset']) if (typeof saved[key] === 'boolean') settings[key] = saved[key];
       if ([30, 60, 120, 300].includes(saved.interval)) settings.interval = saved.interval;
       if (Number.isFinite(saved.opacity)) settings.opacity = Math.max(65, Math.min(100, saved.opacity));

@@ -2,6 +2,7 @@ const { DatabaseSync } = require('node:sqlite');
 const { isMainThread, parentPort, workerData } = require('node:worker_threads');
 const path = require('node:path');
 const os = require('node:os');
+const fs = require('node:fs');
 
 /** 使用系统日历计算半开区间，兼容夏令时造成的非二十四小时日。 */
 function dayRange(now = new Date()) {
@@ -42,16 +43,16 @@ function aggregateUsage(db, now = new Date()) {
 }
 
 /** 短连接只读打开 OpenCode 数据库，支持默认 XDG 路径和显式路径覆盖。 */
-function readOpenCodeUsage(now = new Date(), filename = process.env.OPENCODE_DB_PATH || path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share'), 'opencode', 'opencode.db')) {
+function readOpenCodeUsage(now = new Date(), filename = process.env.OPENCODE_DB_PATH || process.env.OPENCODE_DB || path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share'), 'opencode', 'opencode.db')) {
   let db;
   try {
     db = new DatabaseSync(filename, { readOnly: true });
     db.exec('PRAGMA query_only = ON; PRAGMA busy_timeout = 1500;');
     return aggregateUsage(db, now);
   } catch (error) {
-    return { date: dayRange(now).date, tokens: null, updatedAt: +now, error: `无法读取 OpenCode 用量，请检查数据库路径或版本：${error.message}` };
+    return { date: dayRange(now).date, tokens: null, updatedAt: +now, status: fs.existsSync(filename) ? 'error' : 'unavailable', error: `无法读取 OpenCode 用量，请检查数据库路径或版本：${error.message}` };
   } finally { db?.close(); }
 }
 
-if (!isMainThread) parentPort.postMessage(readOpenCodeUsage(new Date(workerData.now)));
+if (!isMainThread && require.main === module) parentPort.postMessage(readOpenCodeUsage(new Date(workerData.now)));
 module.exports = { dayRange, aggregateUsage, readOpenCodeUsage };

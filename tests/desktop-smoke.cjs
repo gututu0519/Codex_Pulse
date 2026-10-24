@@ -34,8 +34,8 @@ async function smoke() {
         usage = (await page.evaluate(() => window.pulse.get())).usage;
       }
       assert.ok(usage && !usage.error, usage?.error || '本地统计工作线程未返回结果');
-      assert.ok(Number.isFinite(usage.tokens));
-      console.log(`OpenCode usage: tokens=${usage.tokens}, timezone=${usage.timezone}, sessions=${usage.sessions}`);
+      assert.ok(Number.isFinite(usage.sources.opencode.tokens));
+      console.log(`OpenCode usage: tokens=${usage.sources.opencode.tokens}`);
     }
     await page.evaluate(() => window.pulse.settings({ compact: false }));
     const weekly = { remaining: 67, minutes: 10080, resetsAt: Math.floor(Date.now() / 1000) + 500000 };
@@ -79,7 +79,7 @@ async function smoke() {
     ]) {
       const fixture = { ...original, status: 'connected', busy: false, error: null, usage, settings: { ...original.settings, compact: false }, quota: { primary: weekly, secondary: null } };
       await application.evaluate(({ BrowserWindow }, state) => BrowserWindow.getAllWindows()[0].webContents.send('pulse:state', state), fixture);
-      await page.getByRole('region', { name: '今日 Token', exact: true }).getByText(expected, { exact: true }).waitFor();
+      await page.getByRole('button', { name: '今日 Token', exact: true }).getByText(expected, { exact: true }).waitFor();
       assert.equal(await page.getByRole('progressbar').count(), 1);
     }
     await page.getByRole('button', { name: '偏好设置', exact: true }).click();
@@ -95,7 +95,7 @@ async function smoke() {
     await page.screenshot({ path: path.join(os.tmpdir(), 'opencode', 'codex-pulse-preview.png') });
     await page.getByRole('button', { name: '收起为迷你悬浮窗' }).click();
     await page.getByRole('button', { name: '展开面板' }).waitFor();
-    assert.equal(await page.locator('.compact-shell button').count(), 0, '迷你窗不再显示放大按钮');
+    assert.equal(await page.locator('.compact-shell button').count(), 1, '迷你窗提供用量详情按钮');
     await page.locator('.compact-usage').getByText('128.6K', { exact: false }).waitFor();
     assert.match(await page.locator('.compact-usage').getAttribute('title'), /128,640/);
     assert.equal((await application.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getBounds())).height, 96);

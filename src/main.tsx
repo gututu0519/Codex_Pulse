@@ -5,8 +5,11 @@ import './style.css';
 
 type QuotaWindow = { remaining: number; minutes: number | null; resetsAt: number | null };
 type ResetCredits = { availableCount: number; credits: { status: string; expiresAt: number | null }[] | null };
-type DailyUsage = { date: string; tokens: number | null; updatedAt: number; error: string | null; input?: number; output?: number; reasoning?: number; cacheRead?: number; cacheWrite?: number; messages?: number; sessions?: number; missing?: number; fallback?: number; timezone?: string };
-type Preferences = { pinned: boolean; compact: boolean; opacity: number; interval: number; notifications: boolean; startup: boolean; autoReset: boolean; lowQuotaReset: boolean };
+type Agent = 'opencode' | 'codex' | 'claude' | 'gemini';
+const agentNames: Record<Agent, string> = { opencode: 'OpenCode', codex: 'Codex', claude: 'Claude Code', gemini: 'Gemini CLI' };
+const agents = Object.keys(agentNames) as Agent[];
+type DailyUsage = { date: string; tokens: number | null; updatedAt: number; error: string | null; input?: number; output?: number; reasoning?: number; cacheRead?: number; cacheWrite?: number; tool?: number; messages?: number; sessions?: number; missing?: number; fallback?: number; timezone?: string; status?: string; sources?: Partial<Record<Agent, DailyUsage>> };
+type Preferences = { pinned: boolean; compact: boolean; opacity: number; interval: number; notifications: boolean; startup: boolean; autoReset: boolean; lowQuotaReset: boolean; usageSources: Agent[] };
 type AutoResetState = { status: string; message: string; nextAt: number | null; last: { at: number; message: string } | null; enabled: boolean };
 type Snapshot = {
   status: string; account: { email: string | null; planType: string | null } | null;
@@ -28,7 +31,7 @@ declare global {
     };
   }
 }
-const defaults: Preferences = { pinned: true, compact: false, opacity: 96, interval: 60, notifications: true, startup: false, autoReset: true, lowQuotaReset: true };
+const defaults: Preferences = { pinned: true, compact: false, opacity: 96, interval: 60, notifications: true, startup: false, autoReset: true, lowQuotaReset: true, usageSources: [...agents] };
 const initial: Snapshot = { status: 'connecting', account: null, quota: null, updatedAt: null, error: null, busy: false, settings: defaults };
 
 /** 构造明确标记的本地演示数据，预览不会混入真实额度。 */
@@ -46,15 +49,59 @@ function localDate(now: number) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
 
-/** 展示本机 OpenCode 今日统计，悬停说明分类、系统时区与部分缺失记录。 */
-function UsageCard({ data, now }: { data: DailyUsage | null | undefined; now: number }) {
+/** 按当前选择汇总有效来源，未知来源不伪装为零用量。 */
+function selectedUsage(data: DailyUsage | null | undefined, selected: Agent[], now: number): DailyUsage {
+  const result: DailyUsage = { date: localDate(now), tokens: 0, updatedAt: data?.updatedAt || now, error: null, missing: 0 };
+  const sources = data?.sources || (data ? { opencode: data } : {});
+  let known = 0;
+  for (const agent of selected) {
+    const source = sources[agent];
+    if (!source || source.date !== result.date || source.tokens == null || (source.error && source.status !== 'partial')) { result.missing!++; continue; }
+    known++;
+    result.tokens! += source.tokens;
+    for (const field of ['input', 'output', 'reasoning', 'cacheRead', 'cacheWrite', 'tool', 'messages', 'sessions'] as const) result[field] = (result[field] || 0) + (source[field] || 0);
+    result.missing! += source.missing || (source.error ? 1 : 0);
+  }
+  if (selected.length && !known) { result.tokens = null; result.error = data?.error || null; }
+  return result;
+}
+
+/** 展示所选来源的当日汇总，点击进入选择和明细。 */
+function UsageCard({ data, now, onClick }: { data: DailyUsage | null | undefined; now: number; onClick: () => void }) {
   const today = localDate(now);
   const tokens = data?.date === today && !data.error ? data.tokens : null;
   const value = tokens === null ? data?.error ? '更新失败' : '暂无数据' : formatTokens(tokens);
   const detail = data?.error ? '本地读取失败 · 10 秒后重试' : tokens === null ? '等待本地统计更新' : `${today} · 系统时间${data?.missing ? ' · 部分缺失' : ' · 含缓存'}`;
   const breakdown = tokens === null ? '' : `输入：${data?.input?.toLocaleString() ?? '—'}\n输出：${data?.output?.toLocaleString() ?? '—'}\n推理：${data?.reasoning?.toLocaleString() ?? '—'}\n缓存读取：${data?.cacheRead?.toLocaleString() ?? '—'}\n缓存写入：${data?.cacheWrite?.toLocaleString() ?? '—'}\n${data?.sessions ?? 0} 个会话 / ${data?.messages ?? 0} 次已完成调用\n`;
-  const tooltip = `${tokens === null ? '' : `${tokens.toLocaleString('zh-CN')} Tokens\n`}${breakdown}本机 OpenCode 全部项目与模型，按调用完成时间统计。\n系统时区：${data?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone}\n每天 00:00 划分，包含缓存 Token，不等同于订阅额度扣减。${data?.fallback ? `\n${data.fallback} 条记录缺少总数，使用分类求和。` : ''}${data?.missing ? `\n${data.missing} 条记录缺少用量，总数为已知部分。` : ''}${data?.error ? `\n${data.error}` : ''}`;
-  return <section className="usage-card" aria-label="今日 Token" title={tooltip}><Activity size={17} /><div><span>今日 Token · OpenCode</span><small>{detail}</small></div><strong>{value}</strong></section>;
+  const tooltip = `${tokens === null ? '' : `${tokens.toLocaleString('zh-CN')} Tokens\n`}${breakdown}所选本地 Agent 的今日用量，含缓存。\n点击选择来源和查看详情。${data?.missing ? '\n部分来源不可用或记录缺失，当前仅展示已知用量。' : ''}${data?.error ? `\n${data.error}` : ''}`;
+  return <button className="usage-card" aria-label="今日 Token" title={tooltip} onClick={onClick}><Activity size={17} /><div><span>今日 Token</span><small>{detail}</small></div><strong>{value}</strong></button>;
+}
+
+/** 展示四个来源的选择、读取状态及独立明细，不展示会话正文。 */
+function UsagePanel({ data, selected, now, onChange, onBack, demo }: { data: DailyUsage | null | undefined; selected: Agent[]; now: number; onChange: (value: Agent[]) => void; onBack: () => void; demo: boolean }) {
+  const sources = data?.sources || (data ? { opencode: data } : {});
+  const total = selectedUsage(data, selected, now);
+  return <section className="usage-panel">
+    <div className="section-title"><button className="back" onClick={onBack}><ChevronLeft size={17} />今日 Token</button><button className="back" onClick={() => onChange(selected.length === agents.length ? [] : [...agents])}>{selected.length === agents.length ? '全不选' : '全选'}</button></div>
+    <div className="usage-total">{total.tokens === null ? '—' : total.tokens.toLocaleString()}<small>{demo ? '演示数据 · ' : ''}{selected.length ? `已选 ${selected.length} 个来源` : '未选择来源'}{total.missing ? ' · 部分统计' : ''}</small></div>
+    <div className="usage-sources">{agents.map(agent => {
+      const source = sources[agent];
+      const fresh = source?.date === localDate(now);
+      const known = fresh && source?.tokens != null;
+      const status = !source ? '等待统计' : source.status === 'unavailable' ? '未检测到本地记录' : !fresh ? '等待今日更新' : source.status === 'error' ? '读取失败' : source.missing || source.error ? '部分统计' : source.messages === 0 ? '今日暂无调用' : '已同步';
+      return <div className="usage-source" key={agent}>
+        <label><input type="checkbox" checked={selected.includes(agent)} onChange={event => onChange(event.target.checked ? [...selected, agent] : selected.filter(value => value !== agent))} /><span>{agentNames[agent]}<small>{status}</small></span><strong>{known ? formatTokens(source.tokens!) : '—'}</strong></label>
+        <details><summary>查看详细</summary><div className="usage-breakdown">
+          <span>总 Token<strong>{known ? source.tokens!.toLocaleString() : '—'}</strong></span>
+          {([['input', '输入（不含缓存）'], ['output', agent === 'claude' ? '输出（含推理）' : '输出'], ['reasoning', agent === 'claude' ? '推理（未单列）' : '推理'], ['cacheRead', '缓存读取'], ['cacheWrite', '缓存写入'], ['tool', '工具提示']] as const).map(([key, label]) => <span key={key}>{label}<strong>{known && source[key] !== undefined && !(agent === 'claude' && key === 'reasoning') ? source[key]!.toLocaleString() : '—'}</strong></span>)}
+          <span>会话 / 用量记录<strong>{known ? `${source.sessions ?? 0} / ${source.messages ?? 0}` : '—'}</strong></span>
+          <small>{source?.updatedAt ? `更新于 ${new Date(source.updatedAt).toLocaleTimeString()}` : '等待首次读取'}</small>
+          {source?.error && <small className="warning">{source.error}</small>}
+        </div></details>
+      </div>;
+    })}</div>
+    <p className="usage-help">按系统时区每日 00:00 划分，含缓存；仅统计本机保留的日志。各来源按用量事件时间归属当日，不等同于订阅额度扣减。</p>
+  </section>;
 }
 
 /** 两种窗口统一使用紧凑的 Token 数量格式。 */
@@ -125,6 +172,7 @@ function App() {
   const [demo, setDemo] = useState(!window.pulse);
   const [preview] = useState(demoState);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [usageOpen, setUsageOpen] = useState(false);
   const [now, setNow] = useState(Date.now());
   const [loginBusy, setLoginBusy] = useState(false);
   const [notice, setNotice] = useState('');
@@ -134,9 +182,11 @@ function App() {
   const prefs = snapshot.settings;
   const view = demo ? preview : snapshot;
   const windows = [view.quota?.primary, view.quota?.secondary].filter((item): item is QuotaWindow => !!item);
-  const single = windows.length <= 1 && !settingsOpen;
-  const showCredits = !!view.quota && !settingsOpen;
-  const showUsage = !settingsOpen;
+  const selected = prefs.usageSources || agents;
+  const usage = selectedUsage(view.usage, selected, now);
+  const single = windows.length <= 1 && !settingsOpen && !usageOpen;
+  const showCredits = !!view.quota && !settingsOpen && !usageOpen;
+  const showUsage = !settingsOpen && !usageOpen;
 
   useEffect(() => {
     void window.pulse?.layout(single, showCredits, showUsage).catch(() => setNotice('窗口尺寸调整失败，请重启应用。'));
@@ -212,16 +262,16 @@ function App() {
   const age = view.updatedAt ? Math.max(0, Math.floor((now - view.updatedAt) / 1000)) : null;
   const ageText = age === null ? '等待首次同步' : age < 60 ? `${age} 秒前更新` : `${Math.floor(age / 60)} 分钟前更新`;
 
-  const todayTokens = view.usage?.date === localDate(now) && !view.usage.error ? view.usage.tokens : null;
+  const todayTokens = usage.tokens;
   if (prefs.compact) return <main className="compact-shell" role="button" tabIndex={0} aria-label="展开面板" onClick={expandCompact}
     onPointerDown={startDrag} onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag} onLostPointerCapture={endDrag}
     onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); void change({ compact: false }); } }}>
     <div className="compact-brand"><Activity size={20} /><span>PULSE<small>{demo ? '演示数据' : connected ? '额度监视' : statusText}</small></span></div>
     {windows.map((item, index) => <div key={index} className={`compact-value ${index ? 'violet' : 'mint'}`}>{Math.round(item.remaining)}%<small>{item.minutes === 10080 ? '周额度' : period(item.minutes, '额度').replace('额度', '')}</small></div>)}
     {!windows.length && <div className="compact-value mint">—<small>暂无额度</small></div>}
-    <div className="compact-usage" title={todayTokens === null ? view.usage?.error || '等待今日 OpenCode 用量同步' : `今日 OpenCode：${todayTokens.toLocaleString('zh-CN')} Tokens（含缓存，系统时间）${view.usage?.missing ? ' · 部分记录缺失' : ''}`}>
-      {todayTokens === null ? '—' : formatTokens(todayTokens)}<small>{view.usage?.error ? '读取失败' : view.usage?.missing ? '今日 Token · 部分' : '今日 Token'}</small>
-    </div>
+    <button className="compact-usage" onPointerDown={event => event.stopPropagation()} onKeyDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); setUsageOpen(true); setSettingsOpen(false); void change({ compact: false }); }} title={todayTokens === null ? usage.error || '等待今日用量同步' : `今日所选来源：${todayTokens.toLocaleString('zh-CN')} Tokens（含缓存）· 点击查看详细`}>
+      {todayTokens === null ? '—' : formatTokens(todayTokens)}<small>{usage.error ? '读取失败' : usage.missing ? '今日 Token · 部分' : '今日 Token'}</small>
+    </button>
     {view.quota?.resetCredits && <div className="compact-credits" title={`额度重置卡：${view.quota.resetCredits.availableCount} 张可用`} aria-label={`重置卡 ${view.quota.resetCredits.availableCount} 张`}><Ticket size={15} /><span>{view.quota.resetCredits.availableCount}</span></div>}
   </main>;
 
@@ -235,7 +285,7 @@ function App() {
       </div>
     </header>
 
-    {settingsOpen ? <div className="settings-panel">
+    {usageOpen ? <UsagePanel data={view.usage} selected={selected} now={now} onChange={value => void change({ usageSources: value })} onBack={() => setUsageOpen(false)} demo={demo} /> : settingsOpen ? <div className="settings-panel">
       <div className="section-title"><button className="back" onClick={() => setSettingsOpen(false)}><ChevronLeft size={17} />偏好设置</button><span className="micro">MAKE IT YOURS</span></div>
       <div className="setting-row"><div>始终置顶<small>让额度保持在视线之内</small></div><Toggle label="始终置顶" checked={prefs.pinned} onChange={() => void change({ pinned: !prefs.pinned })} /></div>
       <div className="setting-row"><div>低额度提醒<small>剩余 20% / 10% 时通知</small></div><Toggle label="低额度提醒" checked={prefs.notifications} onChange={() => void change({ notifications: !prefs.notifications })} /></div>
@@ -254,15 +304,15 @@ function App() {
         {!windows.length && <div className="quota-empty"><Activity size={24} /><span>{view.status === 'connected' ? '当前账号暂无可用额度窗口' : view.status === 'error' ? '额度暂时无法获取，请重试' : view.status === 'signed-out' ? '连接账号后显示实际额度' : '等待额度同步'}</span></div>}
       </div>
       {showCredits && <ResetCreditCard data={view.quota?.resetCredits} now={now} automation={snapshot.autoReset} demo={demo} />}
-      {showUsage && <UsageCard data={view.usage} now={now} />}
+      {showUsage && <UsageCard data={usage} now={now} onClick={() => setUsageOpen(true)} />}
       {demo ? <button className="insight preview-note" onClick={() => { setDemo(false); setNotice(''); }}><Eye size={14} /><span>界面预览 · 当前数值为演示数据</span><X size={13} /></button>
         : !connected && !view.quota ? <button className="connect-button" disabled={loginBusy} onClick={() => void signIn()}><LogIn size={15} /><span>{loginBusy ? '正在打开浏览器…' : view.status === 'logging-in' ? '在浏览器完成授权 · 重新打开' : '连接 ChatGPT 账号'}</span><ExternalLink size={13} /></button>
         : <div className={`insight ${view.status === 'error' ? 'warning' : ''}`}><ShieldCheck size={14} /><span>{view.status === 'error' ? '同步失败 · 显示上次成功获取的数据' : '官方额度同步，让每一次灵感从容发生'}</span></div>}
       {(notice || view.error) && <div className="notice" role="status" title={notice || view.error || ''}>{notice || view.error}</div>}
     </>}
 
-    <footer><button className={`refresh-button ${snapshot.busy && !demo ? 'syncing' : ''}`} disabled={snapshot.busy && !demo} onClick={() => void sync()} title="立即刷新"><RefreshCw size={12} /><span>{demo ? '预览模式' : ageText}</span></button><div className="footer-actions"><IconButton title="偏好设置" active={settingsOpen} onClick={() => setSettingsOpen(!settingsOpen)}><Settings2 size={15} /></IconButton><span className="divider" /><IconButton title="收起为迷你悬浮窗" onClick={() => { setSettingsOpen(false); void change({ compact: true }); }}><ArrowDownLeft size={16} /></IconButton></div></footer>
-    {!settingsOpen && !view.quota && !demo && <button className="empty-preview" onClick={() => setDemo(true)}><Eye size={11} />先看看界面效果</button>}
+    <footer><button className={`refresh-button ${snapshot.busy && !demo ? 'syncing' : ''}`} disabled={snapshot.busy && !demo} onClick={() => void sync()} title="立即刷新"><RefreshCw size={12} /><span>{demo ? '预览模式' : ageText}</span></button><div className="footer-actions"><IconButton title="偏好设置" active={settingsOpen} onClick={() => { setUsageOpen(false); setSettingsOpen(!settingsOpen); }}><Settings2 size={15} /></IconButton><span className="divider" /><IconButton title="收起为迷你悬浮窗" onClick={() => { setSettingsOpen(false); setUsageOpen(false); void change({ compact: true }); }}><ArrowDownLeft size={16} /></IconButton></div></footer>
+    {!settingsOpen && !usageOpen && !view.quota && !demo && <button className="empty-preview" onClick={() => setDemo(true)}><Eye size={11} />先看看界面效果</button>}
   </main>;
 }
 
